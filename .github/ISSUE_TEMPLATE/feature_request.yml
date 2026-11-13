@@ -1,0 +1,17 @@
+name: Feature request
+description: Suggest an improvement or compiler pattern to support
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior and example
+      description: Synthetic examples and public references are welcome.
+    validations:
+      required: true

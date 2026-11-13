@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
+  <title id="title">VORTHYX</title>
+  <desc id="desc">From native evidence to readable Python. An open-source project by DimaReverse.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0d090d"/><stop offset="1" stop-color="#25101d"/></linearGradient>
+    <linearGradient id="ruby"><stop stop-color="#ff527c"/><stop offset="1" stop-color="#9d1746"/></linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#ffffff" stroke-opacity=".035"/></pattern>
+  </defs>
+  <rect width="1280" height="360" rx="20" fill="url(#bg)"/>
+  <rect width="1280" height="360" rx="20" fill="url(#grid)"/>
+  <path d="M62 80h92l-46 95z M80 80l28 58 28-58 M108 175v75" fill="none" stroke="url(#ruby)" stroke-width="8" stroke-linejoin="round"/>
+  <text x="200" y="100" fill="#ff7796" font-family="monospace" font-size="16" letter-spacing="4">DIMAREVERSE / OPEN SOURCE</text>
+  <text x="195" y="191" fill="#fff4f7" font-family="Segoe UI,Arial,sans-serif" font-size="84" font-weight="800" letter-spacing="8">VORTHYX</text>
+  <text x="200" y="241" fill="#dbc7d0" font-family="Segoe UI,Arial,sans-serif" font-size="25">From native evidence to readable Python.</text>
+  <path d="M200 277h970" stroke="#743047"/>
+  <text x="200" y="310" fill="#bc9ba9" font-family="monospace" font-size="15" letter-spacing="2">NUITKA / STATIC RECOVERY / COMMUNITY</text>
+  <path d="M1040 96l-40 40 40 40 M1120 96l40 40-40 40 M1095 83l-30 106" fill="none" stroke="#b73760" stroke-width="5" opacity=".75"/>
+</svg>

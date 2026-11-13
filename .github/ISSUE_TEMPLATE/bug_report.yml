@@ -1,0 +1,28 @@
+name: Bug report
+description: Report a reproducible recovery or tooling problem
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Please share synthetic fixtures and redacted reports. Do not upload secrets, private code, or binaries you cannot redistribute. For security vulnerabilities, follow SECURITY.md.
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Commit, OS, architecture, host Python, and target Python/Nuitka versions if known.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Exact command and a minimal source fixture or public reproducer.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Expected and observed behavior
+      description: Include relevant redacted diagnostics and explain how behavior was checked.
+    validations:
+      required: true

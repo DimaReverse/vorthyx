@@ -1,0 +1,18 @@
+VORTHYX by DimaReverse
+
+Project lineage:
+https://github.com/DimaReverse/hexpyrion
+https://github.com/DimaReverse/nuitka-revenant
+
+The upstream MIT notices read:
+HEXPYRION: Copyright (c) 2026 dimareverse
+REVENANT: Copyright (c) 2026 DimaReverse
+Both notices are retained in LICENSE together with the MIT permission text.
+
+Related, separate project:
+https://github.com/DimaReverse/nuitka-themida-unpacker
+Its external unpacking pipeline is not bundled in this repository.
+
+Dependencies are installed separately and retain their own licenses.
+No Nuitka commercial checkout, application binary, recovered third-party
+source, analysis dump, or private conversation is part of this distribution.

@@ -1,0 +1,4 @@
+# Baseline static analysis dependencies. Local checks used these exact versions.
+capstone==5.0.9
+pefile==2024.8.26
+zstandard==0.25.0

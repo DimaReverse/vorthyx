@@ -1,0 +1,2 @@
+# Optional cross-version bytecode metadata; not required for NDX native lifting.
+xdis==6.1.8

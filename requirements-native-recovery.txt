@@ -1,0 +1,2 @@
+# Optional: bounded, read-only emulation of callback-backed x64 metadata.
+unicorn==2.1.4
