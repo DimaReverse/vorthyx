@@ -99886,7 +99886,15 @@ _REG32 = {'eax': 'rax', 'ebx': 'rbx', 'ecx': 'rcx', 'edx': 'rdx',
 
 
 def _canon_reg(r):
-    """Normalizza i nomi registro a 64-bit (esi→rsi, r8d→r8, ...)."""
+    """Normalizza i nomi registro a 64-bit (esi→rsi, r8d→r8, ...).
+
+    ``None`` (an absolute memory operand such as ``[0x140001000]`` has no
+    base register) must stay ``None`` instead of raising: callers pass
+    ``parse_mem(...)[0]`` straight through and then look the result up in
+    the register map, which is already ``None``-tolerant.
+    """
+    if not isinstance(r, str):
+        return None
     r = r.strip()
     if r in GP_REGS:
         return r
@@ -107609,7 +107617,18 @@ class ModuleCodeAnalyzer:
                 for site, insns in self._lea_window_scan(str_va, after=6):
                     for i, (insn, target) in enumerate(insns):
                         if (insn.mnemonic == 'lea' and target is not None and
+                                target % 8 == 0 and
+                                target not in str_vas and
                                 self.img.is_data(target)):
+                            # The candidate is a pointer array, so it must hold
+                            # the whole module's constant slots.  Without this
+                            # check a nearby C string (e.g. the module name)
+                            # followed by any direct call was accepted as the
+                            # array base, producing odd bases and losing every
+                            # slot resolution for that module.
+                            last = target + 8 * len(self.module.consts) - 1
+                            if not self.img.is_data(last):
+                                continue
                             for j in range(i + 1, min(i + 4, len(insns))):
                                 next_insn, _next_target = insns[j]
                                 if (next_insn.mnemonic == 'call' and
@@ -107627,6 +107646,18 @@ class ModuleCodeAnalyzer:
                         break
                 if priv_base is not None:
                     break
+        # Module/extension builds can keep the private array address in a
+        # global pointer (:> mov REG, [rip+slot]; mov ..., [REG+8*i]).  Accept
+        # it when the recovered base above is missing or provably not an
+        # aligned pointer array.
+        if (priv_base is None or priv_base % 8 or
+                priv_base in str_vas):
+            _pointer_base, _pointer_global = \
+                self._constants_base_from_pointer_global()
+            if _pointer_base is not None:
+                priv_base = _pointer_base
+                load_blob_va = None
+                self._pointer_global_base = _pointer_global
         if priv_base is None:
             self._ndx_constants_scan_key = scan_key
             self._ndx_constants_scan_result = None
@@ -107640,8 +107671,13 @@ class ModuleCodeAnalyzer:
             glob_base = self._global_base_from_blob_loader(load_blob_va)
             if glob_base is not None:
                 self.global_base = glob_base
-                for j in range(len(self.module.global_consts)):
-                    self.const_slots[glob_base + 8 * j] = ('glob', j)
+        if self.global_base is None:
+            glob_base = getattr(self, '_pointer_global_base', None)
+            if glob_base is not None:
+                self.global_base = glob_base
+        if self.global_base is not None:
+            for j in range(len(self.module.global_consts)):
+                self.const_slots[self.global_base + 8 * j] = ('glob', j)
         self._ndx_constants_scan_key = scan_key
         self._ndx_constants_scan_result = priv_base
         return priv_base
@@ -107696,6 +107732,133 @@ class ModuleCodeAnalyzer:
             # stale LEAs to be paired with some later unrelated call.
             registers.clear()
         return None
+
+    def _constants_base_from_pointer_global(self):
+        """Recover ``mod_consts`` for module/extension (DLL) builds.
+
+        Those builds do not always call ``loadConstantsBlob`` from the module
+        body.  Instead the private array address lives in a global pointer
+        variable and the body reads it as ``mov REG, [rip+slot]`` followed by
+        ``[REG + 8*i]`` constant loads.  The pointer value is read straight
+        from the image (it is a fixed VA in these builds), then accepted only
+        when the indexed loads that use it stay inside the module's decoded
+        constant count.  Purely static and independent of names/signatures.
+        """
+        const_count = len(self.module.consts)
+        if not self.module.func_ptr or const_count < 2:
+            return None, None
+        bounds = self.img.function_bounds(self.module.func_ptr)
+        max_bytes = min(bounds[1] - bounds[0], 0x10000) \
+            if bounds is not None else 0x10000
+        try:
+            insns = list(self.fd.insns(
+                self.module.func_ptr, max_bytes=max_bytes,
+                stop_at_ret=False))[:60000]
+        except Exception:
+            return None
+        if not insns:
+            return None
+
+        pointers = {}    # canonical register -> pointer value
+        span = 8 * const_count
+        refs = {}
+        for insn in insns:
+            # Score every memory operand against the pointer values that are
+            # live AT THIS instruction (register reuse across branches must
+            # not merge two unrelated arrays).
+            for operand in split_ops(insn.op_str):
+                memory = parse_mem(operand)
+                if memory is None or memory[2] is not None or memory[1] % 8:
+                    continue
+                base = pointers.get(_canon_reg(memory[0]))
+                if base is None:
+                    continue
+                index = memory[1] // 8
+                if index >= 0:
+                    refs.setdefault(base, []).append(index)
+            if insn.mnemonic in ('call', 'jmp'):
+                for register in abi_for(self.img.fmt,
+                                        detect_python_version(self.img)) \
+                        .caller_saved:
+                    pointers.pop(register, None)
+                continue
+            if insn.mnemonic not in ('mov', 'lea') or ',' not in insn.op_str:
+                if ',' in insn.op_str:
+                    destination = insn.op_str.split(',', 1)[0].strip()
+                    register = _canon_reg(destination)
+                    if register:
+                        pointers.pop(register, None)
+                continue
+            destination, source = [part.strip()
+                                   for part in insn.op_str.split(',', 1)]
+            register = _canon_reg(destination)
+            if not register:
+                continue
+            if (insn.mnemonic == 'mov' and 'rip' in source and
+                    parse_mem(source) is not None):
+                slot = rip_target(insn)
+                value = self.img.read_u64(slot) if slot is not None else None
+                if (value is not None and value % 8 == 0 and
+                        self.img.is_data(value) and
+                        self.img.is_data(value + span - 1)):
+                    pointers[register] = value
+                else:
+                    pointers.pop(register, None)
+            else:
+                pointers.pop(register, None)
+
+        if not refs:
+            return None, None
+
+        def pick(count, exclude=()):
+            if count < 2:
+                return None
+            scores = {}
+            observed = {}
+            for value, indices in refs.items():
+                if value in exclude:
+                    continue
+                inside = [index for index in indices if index < count]
+                if not inside:
+                    continue
+                scores[value] = len(inside)
+                observed[value] = set(inside)
+            if not scores:
+                return None
+            # A bookkeeping struct pointer is also indexed densely, but only
+            # over its small field range (e.g. offsets 0x0..0xd0).  The real
+            # constant array is referenced across its whole width, so prefer
+            # candidates that reach the upper part of the decoded pool.
+            reach = max(8, count * 3 // 4)
+            eligible = [value for value in scores
+                        if max(observed[value]) >= reach]
+            candidates = eligible or list(scores)
+            base = max(candidates, key=lambda value: (
+                len(observed[value]), scores[value], value))
+            if scores[base] < 4:
+                return None
+            return base, scores[base], observed[base]
+
+        private = pick(const_count)
+        if private is None:
+            return None, None
+        base, score, observed = private
+        self._pointer_global_indices = observed
+        # Global constants live in a second array of their own width; the
+        # private array must not be reported twice.
+        glob_base = None
+        glob_count = len(getattr(self.module, 'global_consts', ()) or ())
+        if glob_count >= 2:
+            glob = pick(glob_count, exclude={base})
+            if glob is not None:
+                glob_base = glob[0]
+        if self.verbose:
+            print(f'  constants-pointer-global: base={hex(base)} '
+                  f'({score} indexed loads, {len(observed)} distinct, '
+                  f'max index {max(observed)})'
+                  + (f', global={hex(glob_base)}'
+                     if glob_base is not None else ''))
+        return base, glob_base
 
     def _find_constants_by_reference_legacy(self):
         """Universal fallback for find_constants_arrays.
@@ -107770,6 +107933,11 @@ class ModuleCodeAnalyzer:
         slots = set()
         for insn in insns:
             if 'rip' not in insn.op_str:
+                continue
+            # Indirect call/jmp operands are IAT/PLT slots, not module
+            # constant slots; including them pulled the estimated base into
+            # the import table.
+            if insn.mnemonic in ('call', 'jmp'):
                 continue
             target = rip_target(insn)
             if target is None or target % pointer_size:
@@ -108119,6 +108287,25 @@ class ModuleCodeAnalyzer:
                 return self.module.global_consts[idx], ('glob', idx)
         return None, None
 
+    def base_pointer_at(self, slot_va):
+        """Constants-array base held by the global pointer ``slot_va``.
+
+        Module/extension builds load the array address from a global pointer
+        (``mov REG, [rip+slot]``) and then index it.  Resolving that pointer
+        back to ``mod_consts`` lets the body register tracker turn
+        ``mov rdx, [REG+8*i]`` into the same slot symbol a direct
+        ``mov rdx, [rip+mod_consts+8*i]`` would produce.
+        """
+        if slot_va is None:
+            return None
+        value = self.img.read_u64(slot_va)
+        if value is None:
+            return None
+        for base in (self.mod_consts_base, self.global_base):
+            if base is not None and value == base:
+                return base
+        return None
+
     def _returned_argument_index(self, va):
         """Index of the ABI argument a small callee returns, if that is all it returns.
 
@@ -108459,6 +108646,11 @@ class ModuleCodeAnalyzer:
         _c_code_offset = 0x78
         pending_func_event = None
         _caller_saved = abi.caller_saved
+        # Registers proven to hold a constants-array base at some point in
+        # this function.  Kept flow-insensitively: the module body is a CFG,
+        # while this is a linear walk, and an error-path `mov reg, ...` would
+        # otherwise erase the base before the real function-creation sites.
+        array_regs = {}
         for insn in fd.insns(self.module.func_ptr, max_bytes=0x20000,
                              stop_at_ret=False)[:30000]:
             m, op = insn.mnemonic, insn.op_str
@@ -108686,7 +108878,15 @@ class ModuleCodeAnalyzer:
                         if cval is not None:
                             regs[dst_c] = ndxS('const', cval)
                         else:
-                            regs[dst_c] = ndxS('slot', t2)
+                            # A global pointer variable can hold the private
+                            # constants array base (module/DLL builds); track
+                            # it as an address so [REG+8*i] stays resolvable.
+                            _ptr_base = self.base_pointer_at(t2)
+                            if _ptr_base is not None:
+                                array_regs[dst_c] = _ptr_base
+                                regs[dst_c] = ndxS('leadata', _ptr_base)
+                            else:
+                                regs[dst_c] = ndxS('slot', t2)
                         import os as _os2
                         if _os2.environ.get('NDX_DBG_R8') and dst_c == 'r8':
                             print(f"[R8]@{insn.address:x} {m} {src[:40]} -> "
@@ -108698,7 +108898,27 @@ class ModuleCodeAnalyzer:
                 elif _canon_reg(src) in regs:
                     regs[dst_c] = regs[_canon_reg(src)]
                 else:
-                    regs.pop(dst_c, None)
+                    memory = parse_mem(src)
+                    _mem_reg = (_canon_reg(memory[0])
+                                if memory and memory[0] and
+                                memory[2] is None else None)
+                    base_sym = regs.get(_mem_reg) if _mem_reg else None
+                    _base_value = array_regs.get(_mem_reg) if _mem_reg else None
+                    if _base_value is None and base_sym is not None and \
+                            base_sym.kind == 'leadata' and \
+                            isinstance(base_sym.value, int):
+                        _base_value = base_sym.value
+                    if (_base_value is not None and memory[1] % 8 == 0 and
+                            _base_value in (self.mod_consts_base,
+                                            self.global_base)):
+                        target = _base_value + memory[1]
+                        cval, cidx = self.const_for_slot(target)
+                        if cval is not None:
+                            regs[dst_c] = ndxS('const', cval, idx=cidx)
+                        else:
+                            regs[dst_c] = ndxS('slot', target, va=target)
+                    else:
+                        regs.pop(dst_c, None)
         # The address Nuitka writes into m_c_code after a NULL-c_code
         # constructor is its shared constant-return implementation, never this
         # function's Python body.  Collect them so they can never be used as
@@ -109932,6 +110152,13 @@ class ModuleCodeAnalyzer:
                     if cval is not None:
                         regs[dst_c] = ndxS('const', cval, idx=cidx)
                     else:
+                        # Global pointer to the private constants array
+                        # (module/DLL builds): keep it as an address so the
+                        # next [REG+8*i] load resolves through const_for_slot.
+                        _ptr_base = self.base_pointer_at(target)
+                        if _ptr_base is not None:
+                            regs[dst_c] = ndxS('leadata', _ptr_base)
+                            continue
                         nm = self.img.symbols.get(target)
                         if nm and nm.startswith('code_objects_'):
                             regs[dst_c] = ndxS('codeobj', nm)
@@ -110180,6 +110407,12 @@ def extract_code_objects(img, mca, resolver, modulecode_va):
                     constant, _entry = mca.const_for_slot(target)
                     if constant is not None:
                         regs[dst_c] = ndxS('const', constant)
+                    elif mca.base_pointer_at(target) is not None:
+                        # Module/DLL builds keep the private constants array
+                        # address in a global pointer; the following
+                        # [REG+8*i] load then resolves through const_for_slot.
+                        regs[dst_c] = ndxS(
+                            'leadata', mca.base_pointer_at(target))
                     elif target in img.imports:
                         regs[dst_c] = ndxS('api', img.imports[target])
                     elif img.is_data(target):
@@ -153203,6 +153436,7 @@ def decompile_binary(target, out_dir, verbose=False, sig_db_path=None, only=None
                     src = _ndx_heal_undefined_imports(
                         src, list(mod.consts) + list(mod.global_consts or ()),
                         _mod_roots)
+                    src = _ndx_promote_module_string_aliases(src, _mod_roots)
                     src = _ndx_drop_builtin_alias_imports(src)
                     _added_imports = _ndx_import_names(src) - \
                         _ndx_import_names(_pre_heal_src)
@@ -153927,6 +154161,39 @@ def _ndx_drop_builtin_alias_imports(src):
     that an import is synthetic.
     """
     return src
+
+
+def _ndx_promote_module_string_aliases(src, module_roots=()):
+    """Turn ``name = 'name'`` module bindings back into ``import name``.
+
+    Imported modules are stored by Nuitka as their own dotted name constant
+    (e.g. the module dict binds ``os`` to the string ``'os'`` before the
+    import executes).  When the binding name and the constant are IDENTICAL
+    and the name is a known module root of this binary, stdlib or PyPI, the
+    assignment is the import statement, not user data.  Any other string
+    binding is left untouched.
+    """
+    if not src:
+        return src
+    roots = set(module_roots or ()) | set(_NDX_STDLIB_TOP) | \
+        set(_NDX_KNOWN_PYPI_TOP)
+    if not roots:
+        return src
+    out = []
+    import_rx = re.compile(r'^(\s*)([A-Za-z_]\w*) = (\'|\")([A-Za-z_]\w*)\3\s*$')
+    seen_imports = set()
+    for line in src.split('\n'):
+        match = import_rx.match(line)
+        if match and match.group(2) == match.group(4) and \
+                match.group(2) in roots:
+            name = match.group(2)
+            statement = 'import ' + name
+            if statement not in seen_imports:
+                seen_imports.add(statement)
+                out.append(match.group(1) + statement)
+            continue
+        out.append(line)
+    return '\n'.join(out)
 
 
 def _ndx_heal_unbound_temporaries(src):
