@@ -408,6 +408,18 @@ class LegacySemanticSafetyTests(unittest.TestCase):
         self.assertEqual(
             DECOMPILER._ndl_demote_module_arg_calls_v90(source), source)
 
+    def test_absolute_memory_operand_has_no_base_register(self):
+        # ``mov rax, [0x140001000]`` has no base register; the register
+        # canonicaliser must return None instead of raising on it.
+        base, _disp, index, _scale = DECOMPILER.parse_mem('[0x140001000]')
+        self.assertIsNone(base)
+        self.assertIsNone(index)
+        self.assertIsNone(DECOMPILER._canon_reg(base))
+
+    def test_register_canonicaliser_keeps_named_registers(self):
+        self.assertEqual(DECOMPILER._canon_reg('esi'), 'rsi')
+        self.assertEqual(DECOMPILER._canon_reg('r8d'), 'r8')
+
 
 if __name__ == '__main__':
     unittest.main()
